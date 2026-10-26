@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -137,12 +138,15 @@ def available(cfg: Config) -> bool:
     return bool(cfg.typesafe_key)
 
 
-def _http_reason(status: int) -> str:
+def _http_reason(status: int, backup: bool = False) -> str:
     """Turn a provider status into something the caller can act on.
 
     The decision model is reachable through more than one route, so name the
     failure in terms of what to fix rather than which company answered.
     """
+    if status == 401 and backup:
+        return ("Cloudflare backup rejected the token (HTTP 401). Check that `wrangler auth "
+                "token --json` returns a token, or set CLOUDFLARE_API_TOKEN. No action executed.")
     if status == 401:
         return ("Decision model rejected the key (HTTP 401). Check the key for the provider "
                 "in use: TYPESAFE_API_KEY for Jev's own API, or OPENROUTER_API_KEY when "
@@ -155,7 +159,27 @@ def _http_reason(status: int) -> str:
     return f"Decision model returned HTTP {status}; no action executed."
 
 
-def _post(url: str, key: str, body: dict) -> object:
+def _cloudflare_token(fallback_key: str) -> str:
+    """The Cloudflare backup token, refreshed by wrangler, else the key from the environment.
+
+    The OAuth token in .env expires about an hour after `wrangler login` refreshes it.
+    `wrangler auth token` refreshes it on demand, but only when CLOUDFLARE_API_TOKEN is
+    not set in its environment, so that variable is dropped from the child process.
+    shortcut: one wrangler call per backup request (about 2 s, backup only),
+    cache by token expiry if that cost shows up in a profile.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "CLOUDFLARE_API_TOKEN"}
+    try:
+        out = subprocess.run(
+            ["wrangler", "auth", "token", "--json"], env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        return json.loads(out.stdout).get("token") or fallback_key
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return fallback_key
+
+
+def _post(url: str, key: str, body: dict, backup: bool = False) -> object:
     for attempt in range(3):
         try:
             response = CLIENT.post(url, json=body, headers={"Authorization": f"Bearer {key}"})
@@ -167,7 +191,7 @@ def _post(url: str, key: str, body: dict) -> object:
         if response.is_error:
             status = response.status_code
             raise TurboUnavailable(
-                _http_reason(status), retry_elsewhere=status >= 500 or status == 429
+                _http_reason(status, backup), retry_elsewhere=status >= 500 or status == 429
             )
         try:
             return response.json()
@@ -200,7 +224,7 @@ def _decide(cfg: Config, body: dict) -> object:
         "input": {"state": body["state"], "questions": body["questions"]},
     }
     try:
-        data = _post(cfg.fallback_endpoint, cfg.fallback_key, cf_body)
+        data = _post(cfg.fallback_endpoint, _cloudflare_token(cfg.fallback_key), cf_body, backup=True)
         result = data["result"]
         if result.get("state") != "Completed":
             raise TurboUnavailable(f"backup state is {result.get('state')!r}")
