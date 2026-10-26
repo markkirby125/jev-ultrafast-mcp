@@ -13,6 +13,7 @@ hundred bytes on the wire instead of a full guard table.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -764,6 +765,8 @@ class Session:
                 if not isinstance(selected, dict) or not selected.get("ok"):
                     reason = (selected or {}).get("reason", "select_failed")
                     raise ValueError(f"could not select {wanted!r}: {reason}")
+                print(f"[jev] select executed: ref={ref} value={selected.get('value')!r} "
+                      f"label={selected.get('label')!r}", file=sys.stderr, flush=True)
                 target_label = str(wanted)
                 self._after_input("fast")
 
