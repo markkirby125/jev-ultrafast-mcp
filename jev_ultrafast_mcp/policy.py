@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
+import sys
 import time
 
 import httpx
@@ -125,7 +127,10 @@ def withdraw_stalled(heads: dict[str, list], history: list[dict]) -> dict[str, l
 
 
 class TurboUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, retry_elsewhere: bool = True):
+        super().__init__(message)
+        # False for a 4xx: the request or key is wrong, and a backup would hide that.
+        self.retry_elsewhere = retry_elsewhere
 
 
 def available(cfg: Config) -> bool:
@@ -160,7 +165,10 @@ def _post(url: str, key: str, body: dict) -> object:
             time.sleep(0.5 * 2 ** attempt)
             continue
         if response.is_error:
-            raise TurboUnavailable(_http_reason(response.status_code))
+            status = response.status_code
+            raise TurboUnavailable(
+                _http_reason(status), retry_elsewhere=status >= 500 or status == 429
+            )
         try:
             return response.json()
         except ValueError:
@@ -172,6 +180,40 @@ def _post(url: str, key: str, body: dict) -> object:
                 f"(HTTP {response.status_code}); no action executed."
             ) from None
     raise TurboUnavailable("Decision model unavailable")
+
+
+def _decide(cfg: Config, body: dict) -> object:
+    """Ask the primary decision route; use the Cloudflare backup only if it cannot answer.
+
+    The backup takes the same state and questions, wrapped in Workers AI's `input` field,
+    and its answers come back one level deeper under `result.result`.
+    """
+    try:
+        return _post(cfg.typesafe_endpoint, cfg.typesafe_key, body)
+    except TurboUnavailable as error:
+        primary = error  # `except ... as` unbinds its name on exit; keep the error for the report
+        if not (cfg.fallback_endpoint and cfg.fallback_key) or not primary.retry_elsewhere:
+            raise
+    print("[jev] primary decision route unavailable; using the Cloudflare backup", file=sys.stderr)
+    cf_body = {
+        "model": cfg.fallback_model,
+        "input": {"state": body["state"], "questions": body["questions"]},
+    }
+    try:
+        data = _post(cfg.fallback_endpoint, cfg.fallback_key, cf_body)
+        result = data["result"]
+        if result.get("state") != "Completed":
+            raise TurboUnavailable(f"backup state is {result.get('state')!r}")
+        return result["result"]
+    except TurboUnavailable as backup:
+        raise TurboUnavailable(
+            f"Primary decision route failed ({primary}); backup also failed ({backup})"
+        ) from None
+    except (KeyError, TypeError):
+        raise TurboUnavailable(
+            "Primary decision route failed and the backup returned an unexpected body; "
+            "no action executed."
+        ) from None
 
 
 def _shape(value: object) -> str:
@@ -389,7 +431,7 @@ def choose(cfg: Config, observation: Observation, goal: str, history: list[dict]
     body = {"model": cfg.typesafe_model, "state": state, "questions": questions}
 
     started = time.perf_counter()
-    result = _post(cfg.typesafe_endpoint, cfg.typesafe_key, body)
+    result = _decide(cfg, body)
     operation_answer = _validate(
         _answers(result, "operation"), operations | {"DONE", "BLOCKED"}
     )
@@ -450,7 +492,7 @@ def _pick_option(cfg: Config, element, goal: str, observation: Observation) -> s
         },
     }
     try:
-        answer = _answers(_post(cfg.typesafe_endpoint, cfg.typesafe_key, body), "option")
+        answer = _answers(_decide(cfg, body), "option")
         return answer.get("choice")
     except TurboUnavailable:
         # An unanswerable option question is not a failure: the caller falls back
@@ -511,7 +553,6 @@ def text_for(cfg: Config, goal: str, element, observation: Observation,
     result = _post(base + "/chat/completions", cfg.text_model_key, {
         "model": cfg.text_model,
         "max_tokens": 1024,
-        "response_format": {"type": "json_object"},
         **reasoning,
         "messages": [
             {"role": "system", "content": TEXT_VALUE},
@@ -523,6 +564,11 @@ def text_for(cfg: Config, goal: str, element, observation: Observation,
     except (KeyError, IndexError, TypeError):
         raw = None
     try:
+        if isinstance(raw, str):
+            # DeepSeek (and some other helpers) wrap JSON in ```json fences; strip before parsing.
+            fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, re.S)
+            if fence:
+                raw = fence.group(1)
         output = json.loads(raw or "")
         value = output["text"]
         if set(output) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:

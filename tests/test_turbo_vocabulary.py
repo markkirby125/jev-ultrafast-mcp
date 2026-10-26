@@ -290,11 +290,11 @@ def test_a_disabled_control_still_reaches_the_model_in_the_state(monkeypatch):
     """
     captured: dict = {}
 
-    def _capture(url, key, body):
+    def _capture(cfg, body):
         captured.update(body)
         raise policy.TurboUnavailable("stop here; the body is what we came for")
 
-    monkeypatch.setattr(policy, "_post", _capture)
+    monkeypatch.setattr(policy, "_decide", _capture)
     observation = _observation([
         Element(ref="e1", role="combobox", name="选项", options=[{"value": "A"}]),
         Element(ref="e2", role="button", name="提交答案", disabled=True),

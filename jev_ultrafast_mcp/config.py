@@ -310,6 +310,12 @@ class Config:
     #   OpenRouter      : https://openrouter.ai/api/alpha/decisions (OPENROUTER key;
     #                     note the path is outside /api/v1)
     typesafe_endpoint: str = TYPESAFE_ENDPOINT
+    # Backup decision route, tried only when the primary is unreachable or fails with a
+    # 5xx or a bad body (never on a 4xx). Cloudflare Workers AI: needs an account ID,
+    # an API token, and the model's `/ai/run` body shape. Unset means no backup.
+    fallback_endpoint: str | None = None
+    fallback_key: str | None = None
+    fallback_model: str = "typesafe/jev-1.14.0"
     # The text helper. An explicit TEXT_MODEL_* configuration wins; otherwise both halves
     # are inherited from `provider` together, so key and base URL never disagree.
     # `text_model` is None only in the inherited case, where the caller has not named a
@@ -336,6 +342,8 @@ class Config:
             w, h = (int(part) for part in window.lower().split("x", 1))
         except Exception:  # noqa: BLE001 - a malformed JEVMCP_WINDOW falls back, it does not refuse
             w, h = 1280, 860
+        account = _env("CLOUDFLARE_ACCOUNT_ID")
+        cf_token = _env("CLOUDFLARE_API_TOKEN")
         return cls(
             chrome=os.environ.get("JEVMCP_CHROME"),
             mode=os.environ.get("JEVMCP_MODE", "launch"),
@@ -362,6 +370,12 @@ class Config:
             typesafe_model=os.environ.get("TYPESAFE_MODEL", "jev-latest"),
             provider=provider,
             typesafe_endpoint=turbo_endpoint,
+            fallback_endpoint=(
+                f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/run"
+                if account and cf_token else None
+            ),
+            fallback_key=cf_token or None,
+            fallback_model=os.environ.get("CLOUDFLARE_JEV_MODEL", "typesafe/jev-1.14.0"),
             text_model_key=text_key,
             text_model_base=text_base,
             text_model=text_model,
