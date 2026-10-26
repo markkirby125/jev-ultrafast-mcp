@@ -440,6 +440,11 @@ STALE_REF_REASONS = {"detached", "page_changed", "target_changed", "unknown_ref"
 # recovery from multiplying the request count by STALE_REF_RETRIES.
 STALE_REF_RETRIES = 3
 
+# How many times DONE may be refused while the goal's own `verify` fails on the
+# page. One refusal covers a missing submit click; the second allows one wrong
+# action. Past that the goal ends as `unconfirmed`, as it always did.
+DONE_REFUSALS = 2
+
 
 @SERVER.tool(annotations=WRITES)
 def browser_goal(goal: str, url: str = "", session: str = "default", max_steps: int = 20,
@@ -489,9 +494,14 @@ def browser_goal(goal: str, url: str = "", session: str = "default", max_steps: 
         model_ms = 0     # time spent waiting on the decision model
         browser_ms = 0   # time spent waiting on the page
         tokens = 0
+        refused = 0      # DONE answers refused because the page does not prove them
+        refusal = None   # the refused DONE, shown to the model on its next request
+        verified = None  # the verify result for the page as it stands, once computed
         while steps < max_steps:
             history = [{"op": step.op, "ref": step.ref, "target": step.target, "ok": step.ok}
                        for step in tab.history[-10:]]
+            if refusal:
+                history.append(refusal)
             try:
                 decision = policy.choose(CONFIG, observation, goal, history)
             except policy.TurboUnavailable as exc:
@@ -520,6 +530,21 @@ def browser_goal(goal: str, url: str = "", session: str = "default", max_steps: 
                                  "re-reading in case it is still mounting")
                     observation = _first_read(tab)
                     continue
+                if operation == "DONE" and verify:
+                    # DONE is the model's opinion. With a verify on the goal, the
+                    # page must show the submit-side proof before the loop stops.
+                    verified = assertions_mod.run(verify, observation, allow_js=CONFIG.allow_js,
+                                                  eval_js=tab.evaluate_js)
+                    if not verified["pass"] and refused < DONE_REFUSALS and recovered < max_steps:
+                        refused += 1
+                        recovered += 1
+                        missing = "; ".join(c["detail"] for c in verified["checks"] if not c["ok"])
+                        refusal = {"op": "DONE", "ref": None, "target": None, "ok": False,
+                                   "error": f"refused: the page does not show the goal yet ({missing})"}
+                        trace.append(f"  -   DONE refused, verify fails on this page ({missing}); "
+                                     f"{refused}/{DONE_REFUSALS}")
+                        verified = None
+                        continue
                 status = operation.lower()
                 trace.append(f"  {steps + 1}. {operation} (conf {decision.get('confidence', 0):.2f})")
                 break
@@ -550,6 +575,7 @@ def browser_goal(goal: str, url: str = "", session: str = "default", max_steps: 
                 observation = tab.observe()
                 continue
             stale = 0
+            refusal = None
             browser_ms += step_result.get("ms") or 0
             trace.append(
                 f"  {steps}. {operation} {decision.get('ref') or ''} "
@@ -577,10 +603,10 @@ def browser_goal(goal: str, url: str = "", session: str = "default", max_steps: 
         else:
             status = f"stopped: hit max_steps={max_steps}"
 
-        verified = None
         if verify:
-            verified = assertions_mod.run(verify, observation, allow_js=CONFIG.allow_js,
-                                          eval_js=tab.evaluate_js)
+            if verified is None:
+                verified = assertions_mod.run(verify, observation, allow_js=CONFIG.allow_js,
+                                              eval_js=tab.evaluate_js)
             # `DONE` is an opinion; an assertion is a fact. When the model's
             # summary disagrees with the page, the page wins. This is not a
             # rare disagreement -- it is the normal shape of a goal whose last
