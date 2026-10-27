@@ -21,6 +21,7 @@ import json
 import re
 from pathlib import Path
 
+import httpx
 import pytest
 
 from jev_ultrafast_mcp import policy, server
@@ -287,28 +288,40 @@ def test_a_disabled_control_still_reaches_the_model_in_the_state(monkeypatch):
     the page saying "fill something in first", and a model that cannot see the
     button cannot know there is anything to wait for -- it will report the form
     as having no way to submit it, which is what happened.
+
+    Only the transport is mocked. The primary answers 500, so it may be retried
+    elsewhere, and the real Cloudflare backup runs against the recorded request.
     """
-    captured: dict = {}
+    sent: dict[str, dict] = {}
 
-    def _capture(cfg, body):
-        captured.update(body)
-        raise policy.TurboUnavailable("stop here; the body is what we came for")
+    def _handler(request: httpx.Request) -> httpx.Response:
+        sent[str(request.url)] = json.loads(request.content)
+        return httpx.Response(500)
 
-    monkeypatch.setattr(policy, "_decide", _capture)
+    monkeypatch.setattr(policy, "CLIENT", httpx.Client(transport=httpx.MockTransport(_handler)))
+    monkeypatch.setattr(policy, "_cloudflare_token", lambda _key: "test-token")
+    cfg = dataclasses.replace(
+        _cfg(),
+        typesafe_endpoint="https://primary.test/decide", typesafe_key="primary-key",
+        fallback_endpoint="https://backup.test/ai/run", fallback_key="env-key",
+        fallback_model="typesafe/jev-1.14.0",
+    )
     observation = _observation([
         Element(ref="e1", role="combobox", name="选项", options=[{"value": "A"}]),
         Element(ref="e2", role="button", name="提交答案", disabled=True),
     ])
 
-    with pytest.raises(policy.TurboUnavailable):
-        policy.choose(_cfg(), observation, "submit the answer", [])
+    with pytest.raises(policy.TurboUnavailable, match="backup also failed"):
+        policy.choose(cfg, observation, "submit the answer", [])
 
-    shown = {element["ref"]: element for element in captured["state"]["elements"]}
+    assert set(sent) == {"https://primary.test/decide", "https://backup.test/ai/run"}
+    backup = sent["https://backup.test/ai/run"]["input"]
+    shown = {element["ref"]: element for element in backup["state"]["elements"]}
     assert shown["e2"]["disabled"] is True
     assert "disabled" not in shown["e1"], (
         "the mark belongs to the element that has it, not to every element")
 
-    assert '"e2"' not in json.dumps(captured["questions"]), (
+    assert '"e2"' not in json.dumps(backup["questions"]), (
         "a disabled control must not be put to the model as something to choose")
 
 
