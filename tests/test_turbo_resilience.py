@@ -479,6 +479,81 @@ def test_a_model_that_says_done_over_an_unproven_page_is_not_reported_as_done(mo
     assert "status: unconfirmed" in out, out
     assert "verified: FAIL" in out, out
     assert "the assertion wins" in out, out
+    # The refusal budget is spent before the unproven DONE is believed as a last resort.
+    assert out.count("DONE refused") == server.DONE_REFUSALS, out
+    assert len(_seen) == 2 + server.DONE_REFUSALS, _seen
+
+
+class _ProvingSession(_FakeSession):
+    """A session whose page shows the proof once `proves_after` actions have run."""
+
+    proves_after = 1
+
+    def _page(self) -> Observation:
+        self.last = _checked_in() if len(self.acts) >= self.proves_after else _observation()
+        return self.last
+
+    def observe(self, **_kwargs) -> Observation:
+        self.events.append("observe")
+        return self._page()
+
+    def act(self, ops, **kwargs) -> dict:
+        payload = super().act(ops, **kwargs)
+        # The executor reads `tab.last` after an action, so the page must change there too.
+        self._page()
+        return payload
+
+
+def test_a_refused_done_lets_the_model_act_again(monkeypatch):
+    """The Passengers failure: DONE arrives before the submit click.
+
+    The first DONE is refused because the page does not show the proof yet, so the
+    loop goes on and the model gets to click. The second DONE is over a proving
+    page and is believed.
+    """
+    session = _ProvingSession([_ok(), _ok()])
+    session.proves_after = 2
+
+    out, _seen = _drive(monkeypatch, session,
+                        [_click(), {"operation": "DONE", "confidence": 0.9},
+                         _click(), {"operation": "DONE", "confidence": 0.9}], verify=PROOF)
+
+    assert "status: done" in out, out
+    assert "verified: PASS" in out, out
+    assert "DONE refused" in out, out
+    assert len(session.acts) == 2, session.acts
+
+
+def test_done_over_a_proving_page_ends_at_once(monkeypatch):
+    session = _ProvingSession([_ok()])
+
+    out, seen = _drive(monkeypatch, session,
+                       [_click(), {"operation": "DONE", "confidence": 0.9}], verify=PROOF)
+
+    assert "status: done" in out, out
+    assert "refused" not in out, out
+    assert len(seen) == 2, seen
+
+
+def test_the_refusal_reaches_the_model_as_history(monkeypatch):
+    """Without this the model sees the same page and history and says DONE again."""
+    session = _FakeSession([_ok()])
+    histories: list[list[dict]] = []
+    decisions = [_click(), {"operation": "DONE", "confidence": 0.9},
+                 {"operation": "DONE", "confidence": 0.9}]
+
+    def fake_choose(_cfg, _observation, _goal, history):
+        histories.append(list(history))
+        return decisions.pop(0) if decisions else {"operation": "DONE", "confidence": 0.9}
+
+    monkeypatch.setattr(server.policy, "available", lambda _cfg: True)
+    monkeypatch.setattr(server.policy, "choose", fake_choose)
+    monkeypatch.setattr(server, "_session", lambda _name: session)
+    server.browser_goal("do the thing", max_steps=20, verify=PROOF, verbose=True)
+
+    refusal = histories[2][-1]
+    assert refusal["op"] == "DONE" and refusal["ok"] is False, refusal
+    assert "refused" in refusal["error"], refusal
 
 
 def test_done_without_a_verify_is_still_taken_at_its_word(monkeypatch):
