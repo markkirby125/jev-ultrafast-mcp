@@ -40,3 +40,6 @@ macros/
 .idea/
 .vscode/
 *.swp
+
+# Local Claude session state, never part of a change
+.claude/
