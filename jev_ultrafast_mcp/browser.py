@@ -149,6 +149,8 @@ class Session:
     _recording: bool = False
     _recording_start_url: str = ""
     _no_change_streak: int = 0
+    # (op, ref) of the last action, kept only when it moved the page (elements or text).
+    _worked: tuple | None = None
     # True while the agent's last observation still matches the live page. The
     # first op of a batch gets a strict freshness check; later ops get an
     # identity check, because the batch's own earlier ops legitimately moved the
@@ -500,6 +502,7 @@ class Session:
         previous goal's count would report itself stuck on its very first step.
         """
         self._no_change_streak = 0
+        self._worked = None
 
     def observe(self, *, include_text: bool = True, full: bool = False,
                 focus: list[str] | None = None) -> Observation:
@@ -584,7 +587,23 @@ class Session:
                 self._no_change_streak = 0 if changed else self._no_change_streak + 1
                 payload["page_changed"] = changed
                 payload["view"] = observation.render(previous, mode="auto")
-        if self._no_change_streak >= NO_CHANGE_LIMIT:
+                # The same action on the same ref worked last time and did nothing
+                # at all this time: it is already applied, so stop before the limit.
+                # Text counts here and not in the streak above, because text-only
+                # change as progress let a model wander between buttons forever.
+                # shortcut: viewport text, so a clock that ticks during the first
+                # click and not the second stops a dead button one step early, and
+                # a page whose text always moves falls back to NO_CHANGE_LIMIT;
+                # mask volatile text if either shows up on real pages.
+                moved = changed or observation.text_digest != previous.text_digest
+                key = (results[0].op, results[0].ref) if len(results) == 1 and results[0].ref else None
+                if key and not moved and key == self._worked:
+                    payload["stuck"] = (
+                        f"Repeating {key[0]} {key[1]} changed nothing: it already took effect. "
+                        "Do not retry the same ref: the goal may be met, or needs a different step."
+                    )
+                self._worked = key if moved else None
+        if "stuck" not in payload and self._no_change_streak >= NO_CHANGE_LIMIT:
             payload["stuck"] = (
                 f"{self._no_change_streak} consecutive actions changed nothing. "
                 "Do not retry the same ref: re-read the observation, look for a "
