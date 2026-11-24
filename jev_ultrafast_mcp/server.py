@@ -503,7 +503,7 @@ def browser_goal(goal: str, url: str = "", session: str = "default", max_steps: 
             if refusal:
                 history.append(refusal)
             try:
-                decision = policy.choose(CONFIG, observation, goal, history)
+                decision = policy.choose(CONFIG, observation, goal, history, tab.counting)
             except policy.TurboUnavailable as exc:
                 # A provider that fails mid-run must not erase the steps already
                 # taken: those are the whole record of how far the goal got, and
@@ -596,6 +596,11 @@ def browser_goal(goal: str, url: str = "", session: str = "default", max_steps: 
             # is refreshed before the break on purpose: `verify` below settles
             # the goal against it, and a goal whose last action removed the
             # thing it acted on must be judged on the page as it stands now.
+            # A counter still counting earns its DONE refusals back: a model that
+            # cannot count says DONE after most clicks, and two refusals ended an
+            # 8-click goal at 5. `recovered` still bounds the refusals of a run.
+            if tab.counting:
+                refused = 0
             if payload.get("stuck"):
                 trace.append(f"  !   {payload['stuck']}")
                 status = "stopped: no progress"

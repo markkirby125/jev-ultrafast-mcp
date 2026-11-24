@@ -233,6 +233,8 @@ def test_the_tool_reports_a_turbo_failure_under_one_prefix():
 class _FakeSession:
     """The parts of `browser.Session` the goal loop touches, scripted."""
 
+    counting = None
+
     def __init__(self, act_results: list[dict]):
         self._act = list(act_results)
         self.history: list = []
@@ -322,7 +324,7 @@ def _drive(monkeypatch, session: _FakeSession, decisions: list[dict], max_steps:
     """Run `browser_goal` against a scripted session and decision sequence."""
     seen: list[dict] = []
 
-    def fake_choose(_cfg, _observation, _goal, _history):
+    def fake_choose(_cfg, _observation, _goal, _history, _counting=None):
         seen.append(_observation)
         if not decisions:
             return {"operation": "DONE", "ref": None, "confidence": 1.0}
@@ -542,7 +544,7 @@ def test_the_refusal_reaches_the_model_as_history(monkeypatch):
     decisions = [_click(), {"operation": "DONE", "confidence": 0.9},
                  {"operation": "DONE", "confidence": 0.9}]
 
-    def fake_choose(_cfg, _observation, _goal, history):
+    def fake_choose(_cfg, _observation, _goal, history, _counting=None):
         histories.append(list(history))
         return decisions.pop(0) if decisions else {"operation": "DONE", "confidence": 0.9}
 
@@ -825,3 +827,18 @@ def test_a_goal_that_never_reached_the_model_reports_no_cost(monkeypatch):
 
     assert "turbo_unavailable" in out, out
     assert "turbo: " not in out, out
+
+
+def test_a_counting_session_earns_its_done_refusals_back(monkeypatch):
+    """A model that cannot count says DONE after most clicks of a counter goal."""
+    done = {"operation": "DONE", "confidence": 0.9}
+    script = [_click(), done, done, _click(), done, done, _click()]
+
+    plain = _FakeSession([_ok()] * 3)
+    out, _seen = _drive(monkeypatch, plain, list(script), verify=PROOF)
+    assert len(plain.acts) == 2 and "unconfirmed" in out, out  # third DONE ends the run
+
+    counter = _FakeSession([_ok()] * 3)
+    counter.counting = ("click", "e1")
+    out, _seen = _drive(monkeypatch, counter, list(script), verify=PROOF)
+    assert len(counter.acts) == 3, out

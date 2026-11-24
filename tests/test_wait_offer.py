@@ -61,3 +61,4 @@ def test_the_repeat_rule_excepts_a_goal_that_asks_for_a_count(monkeypatch):
     rules = " ".join(_sent(monkeypatch)["instructions"]["rules"].split())
     assert "Unless the goal asks for a repeat count" in rules
     assert "is not progress" in rules, "the stall rule itself must stay"
+    assert "A goal with a count is not finished until the page shows that count" in rules

@@ -130,6 +130,14 @@ class Step:
 # limit would be stopping on a page that had not had its chance.
 NO_CHANGE_LIMIT = 3
 
+# How many consecutive repeats of one (op, ref) may move only the page text and
+# stay out of the stall streak. A counter ("Add" pressed N times) changes text
+# and no element, so each repeat is progress; a dead button under a ticking clock
+# looks the same, and this cap is what ends it (1 + cap + 2 actions at most).
+# shortcut: a fixed cap, so a count above cap + 3 on a text-only counter still
+# stops early; read the count from a caller-supplied bound if that is needed.
+TEXT_REPEAT_LIMIT = 10
+
 
 @dataclass
 class Session:
@@ -151,6 +159,8 @@ class Session:
     _no_change_streak: int = 0
     # (op, ref) of the last action, kept only when it moved the page (elements or text).
     _worked: tuple | None = None
+    # Consecutive repeats of `_worked` that moved text only (see TEXT_REPEAT_LIMIT).
+    _text_repeats: int = 0
     # True while the agent's last observation still matches the live page. The
     # first op of a batch gets a strict freshness check; later ops get an
     # identity check, because the batch's own earlier ops legitimately moved the
@@ -495,6 +505,11 @@ class Session:
         count = self._safe_eval("document.body ? document.body.childElementCount : 0")
         return isinstance(count, int) and count > 0
 
+    @property
+    def counting(self) -> tuple | None:
+        """(op, ref) whose repeats keep moving the page text, while under the cap."""
+        return self._worked if 0 < self._text_repeats <= TEXT_REPEAT_LIMIT else None
+
     def reset_progress(self) -> None:
         """Forget the stall streak, so a new goal starts from a clean count.
 
@@ -503,6 +518,7 @@ class Session:
         """
         self._no_change_streak = 0
         self._worked = None
+        self._text_repeats = 0
 
     def observe(self, *, include_text: bool = True, full: bool = False,
                 focus: list[str] | None = None) -> Observation:
@@ -584,7 +600,18 @@ class Session:
             if observation is not None:
                 previous = observation.previous
                 changed = previous is None or observation.digest != previous.digest
-                self._no_change_streak = 0 if changed else self._no_change_streak + 1
+                moved = changed or observation.text_digest != previous.text_digest
+                key = (results[0].op, results[0].ref) if len(results) == 1 and results[0].ref else None
+                # The same action on the same ref moved the text again: a counter.
+                # It is held out of the streak (neither counted nor reset) up to
+                # TEXT_REPEAT_LIMIT times. A text change from any other ref still
+                # counts, so wandering between text-only buttons stops as before.
+                counting = bool(key) and key == self._worked and moved and not changed
+                self._text_repeats = self._text_repeats + 1 if counting else 0
+                if changed:
+                    self._no_change_streak = 0
+                elif not (counting and self._text_repeats <= TEXT_REPEAT_LIMIT):
+                    self._no_change_streak += 1
                 payload["page_changed"] = changed
                 payload["view"] = observation.render(previous, mode="auto")
                 # The same action on the same ref worked last time and did nothing
@@ -595,8 +622,6 @@ class Session:
                 # click and not the second stops a dead button one step early, and
                 # a page whose text always moves falls back to NO_CHANGE_LIMIT;
                 # mask volatile text if either shows up on real pages.
-                moved = changed or observation.text_digest != previous.text_digest
-                key = (results[0].op, results[0].ref) if len(results) == 1 and results[0].ref else None
                 if key and not moved and key == self._worked:
                     payload["stuck"] = (
                         f"Repeating {key[0]} {key[1]} changed nothing: it already took effect. "

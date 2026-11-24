@@ -30,9 +30,9 @@ def _obs(digest: str, text_digest: str, previous: Observation | None) -> Observa
     )
 
 
-def _run(script: list[tuple[dict, str, str]]) -> list[dict]:
+def _run(script: list[tuple[dict, str, str]], session: browser.Session | None = None) -> list[dict]:
     """Act each op in turn; the page then reads (digest, text_digest). Returns the payloads."""
-    session = browser.Session("t", cfg=None, cdp=None)
+    session = session or browser.Session("t", cfg=None, cdp=None)
     session.last = _obs("d0", "t0", None)
     state = {}
 
@@ -71,10 +71,9 @@ def test_repeat_after_an_element_change_stops_on_the_second_click():
 
 
 def test_repeated_click_that_keeps_changing_text_is_not_a_no_effect_repeat():
-    # a counter: every click moves the text, so only the old element-only limit applies (third action)
+    # a counter: every click moves the text, so neither the repeat rule nor the streak stops it
     payloads = _run([(CLICK, "d0", "t1"), (CLICK, "d0", "t2"), (CLICK, "d0", "t3")])
-    assert _stuck(payloads) == [False, False, True]
-    assert "3 consecutive" in payloads[-1]["stuck"]
+    assert _stuck(payloads) == [False, False, False]
 
 
 def test_dead_click_still_gets_the_old_limit():
