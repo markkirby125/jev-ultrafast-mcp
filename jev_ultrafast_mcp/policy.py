@@ -39,8 +39,9 @@ Set every requested filter; a matching result alone does not prove a filter was 
 Do not toggle a checkbox, switch, or radio that is already in the requested state.
 A target marked \u22ee opens on hover only, so clicking it just closes it again.
 HOVER that trigger, then choose from the menu it reveals on the next step.
-Repeating an operation on one element is not progress: the element's own state can
-flip while the goal stands still, and a target that has been retried stops being offered.
+Unless the goal asks for a repeat count, repeating an operation on one element is not
+progress: the element's own state can flip while the goal stands still, and a target
+that has been retried stops being offered.
 Submit populated search fields before opening a result.
 WAIT only when the needed control is absent, disabled, or submitted results are
 still loading. Recent WAIT actions are not evidence of loading.
@@ -64,7 +65,11 @@ OPERATION_LABELS = {
     "SELECT": "Choose an observed dropdown value.",
     "TOGGLE": "Flip an observed checkbox, radio, or switch.",
     "SCROLL": "Scroll the page.",
-    "WAIT": "Wait for the page to update.",
+    # Not "wait for the page to update": every click is followed by an update, and
+    # the local model then chose WAIT after any click (0.43 vs CLICK 0.29, measured).
+    # shortcut: the wording is tuned on one model and a few pages, re-measure
+    # (tests/test_wait_offer.py names the numbers) when the decision model changes.
+    "WAIT": "Wait: only when the page is still loading.",
 }
 
 # The one place the offered vocabulary and the executed vocabulary meet. A name
